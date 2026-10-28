@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1E1912">
+<meta name="robots" content="noindex">
+<title>玉米家叫號</title>
+<link rel="manifest" href="staff.webmanifest">
+<link rel="icon" href="icons/favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="玉米家叫號">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<link rel="preconnect" href="https://firestore.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=LXGW+WenKai+TC:wght@700&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+<div id="app"><p class="loading">載入中…</p></div>
+<script type="module">
+import { onSnapshot, runTransaction, serverTimestamp, getDocFromServer } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
+import { getAuth, connectAuthEmulator, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
+import { app as fbApp, db, shopRef, EMU, normalize, esc, today, hhmm, waiting, headerHtml, toast } from './common.js';
+
+const STAFF_EMAIL = 'staff@yumijia.app';
+const auth = getAuth(fbApp);
+if (EMU) connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+
+const app = document.getElementById('app');
+const CUSTOMER_URL = new URL('./', location.href).href;
+let S = normalize(null), user = null, authReady = false, loaded = false, exists = true, stale = false;
+let busy = false, armReset = false, showSettings = false, loginErr = '', unsub = null;
+const sel = new Set();
+
+/* ---------- saving: every change is a transaction on the latest server copy ---------- */
+// fn edits a fresh copy of the state and may return a value (e.g. the new ticket number).
+async function commit(fn, opts = {}) {
+  if (busy) return;
+  busy = true; render();
+  // Never give up on a write that may still land: a retry would then double up (e.g. issue two numbers).
+  const slow = setTimeout(() => toast('網路比較慢，還在儲存，請稍等…'), 6000);
+  try {
+    const result = await runTransaction(db, async tx => {
+      const snap = await tx.get(shopRef);
+      const cur = normalize(snap.exists() ? snap.data() : null);
+      const before = { issued: cur.issued, ready: cur.ready.slice(), done: cur.done.slice(), cancel: cur.cancel.slice(), day: cur.day };
+      const out = fn(cur);
+      if (out === SKIP) return out;
+      if (opts.clearUndo) cur.undo = null;
+      else if (!opts.noUndo) cur.undo = before;
+      cur.updated = serverTimestamp();
+      tx.set(shopRef, cur);
+      return out;
+    });
+    if (opts.toast) toast(opts.toast);
+    return result;
+  } catch (err) {
+    console.error(err);
+    const c = err && err.code;
+    if (c === 'permission-denied') toast('沒有權限修改，請重新登入');
+    else toast('沒有存到，請檢查網路後再按一次');
+    return undefined;
+  } finally {
+    clearTimeout(slow);
+    busy = false; render();
+  }
+}
+const SKIP = Symbol('skip'); // returned by an edit that decided not to change anything
+const zero = cur => { cur.issued = 0; cur.ready = []; cur.done = []; cur.cancel = []; cur.day = today(); };
+
+/* ---------- screens ---------- */
+function loginHtml() {
+  return '<section class="card login"><h2>店家登入</h2>' +
+    '<p class="small muted" style="margin:0">輸入店家密碼。登入後這支手機會一直保持登入，不用每天重新輸入。</p>' +
+    '<form class="row" id="loginF"><input type="password" id="pw" autocomplete="current-password" placeholder="密碼" aria-label="密碼" required>' +
+    '<button class="btn corn" type="submit"' + (busy ? ' disabled' : '') + '>登入</button></form>' +
+    (loginErr ? '<p class="err" role="alert">' + esc(loginErr) + '</p>' : '') + '</section>' +
+    '<p class="small muted" style="text-align:center;margin:0">客人請到 <a href="./" style="color:var(--ember)">號碼牌查詢頁</a></p>';
+}
+
+function staffHtml() {
+  const w = waiting(S), ready = S.ready.slice().sort((a, b) => a - b), dis = (busy || stale) ? ' disabled' : '';
+  const selW = w.filter(n => sel.has(n)).length, selR = ready.filter(n => sel.has(n)).length;
+  const oldDay = S.issued > 0 && S.day !== today();
+  let h = '';
+  if (stale) h += '<div class="conn" role="alert">連線中斷，正在重新連線…現在按的不會存到</div>';
+  if (oldDay) {
+    h += '<div class="notice"><b>這是 ' + esc(S.day) + ' 的號碼</b><span class="small">今天開店要從 1 號重新開始嗎？客人畫面要等你選了才會顯示今天的號碼。</span>' +
+      '<div class="row"><button class="btn ok" id="newDay"' + dis + '>今天從 1 號開始</button><button class="btn ghost" id="keepDay"' + dis + '>接續上次的號碼</button></div></div>';
+  } else {
+    h += '<button class="btn issue" id="issue"' + dis + '>發下一號 <b>' + (S.issued + 1) + '</b></button>';
+  }
+  h += '<div class="stats"><div class="hl"><b>' + w.length + '</b><span>烤製中</span></div><div><b>' + ready.length + '</b><span>等客人取</span></div><div><b>' + S.issued + '</b><span>今日已發</span></div></div>';
+  h += '<section class="card"><div class="row" style="justify-content:space-between"><h2>烤製中</h2><span class="small muted">點號碼可多選</span></div>' +
+    (w.length ? '<div class="chips">' + w.map(n => '<button class="chip" data-n="' + n + '" aria-pressed="' + sel.has(n) + '">' + n + '</button>').join('') + '</div>' : '<p class="empty">還沒有客人在等。按「發下一號」給客人號碼牌。</p>') +
+    '<div class="row"><button class="btn ok" id="toReady"' + ((selW && !busy && !stale) ? '' : ' disabled') + '>烤好了，通知取餐' + (selW ? '（' + selW + '）' : '') + '</button>' +
+    '<button class="btn warn" id="toCancel"' + ((selW && !busy && !stale) ? '' : ' disabled') + '>取消</button></div></section>';
+  h += '<section class="card"><h2>等客人來拿</h2>' +
+    (ready.length ? '<div class="chips">' + ready.map(n => '<button class="chip ready" data-n="' + n + '" aria-pressed="' + sel.has(n) + '">' + n + '</button>').join('') + '</div>' : '<p class="empty">烤好的號碼會出現在這裡，客人的手機也會同時看到。</p>') +
+    '<div class="row"><button class="btn" id="toDone"' + ((selR && !busy && !stale) ? '' : ' disabled') + '>已取餐' + (selR ? '（' + selR + '）' : '') + '</button>' +
+    (S.undo ? '<button class="btn ghost" id="undo"' + dis + '>復原上一步</button>' : '') + '</div>' +
+    '<p class="small muted" style="margin:0">更新於 ' + hhmm(S.updated) + '</p></section>';
+  h += '<section class="card"><h2>攤位 QR</h2><div class="qrbox"><div class="qr" id="qrShop"></div><div style="flex:1;min-width:160px" class="small">' +
+    '貼在攤位上，客人掃了輸入號碼就能查進度。每張號碼牌也有自己的 QR，發號後會跳出來給客人掃。' +
+    '<div class="row" style="margin-top:8px"><button class="link" id="dlQr">下載 QR 圖檔</button><a class="link" href="./" target="_blank" rel="noopener">看客人畫面 ↗</a></div></div></div></section>';
+  h += showSettings ? settingsHtml() : '<div class="row" style="justify-content:center"><button class="btn ghost" id="openSet">設定</button></div>';
+  return h;
+}
+
+function settingsHtml() {
+  const dis = (busy || stale) ? ' disabled' : '';
+  return '<section class="card"><h2>設定</h2><form id="setF" style="display:flex;flex-direction:column;gap:10px">' +
+    '<div class="grid2"><label class="field">店名<input id="sShop" value="' + esc(S.shop) + '" maxlength="20"></label>' +
+    '<label class="field">營業到幾點<input id="sHours" value="' + esc(S.hours) + '" maxlength="10"></label></div>' +
+    '<div class="grid2"><label class="field">第一組大約等幾分鐘<input id="sBase" type="number" inputmode="numeric" min="0" max="180" value="' + esc(S.base) + '"></label>' +
+    '<label class="field">每多一組加幾分鐘<input id="sPer" type="number" inputmode="numeric" min="0" max="60" value="' + esc(S.per) + '"></label></div>' +
+    '<label class="field">LINE 加好友連結（沒填，客人頁就不顯示 LINE 按鈕）<input id="sLine" type="url" inputmode="url" placeholder="https://lin.ee/…" value="' + esc(S.line) + '"></label>' +
+    '<div class="row"><button class="btn corn" type="submit"' + dis + '>儲存設定</button><button class="btn ghost" type="button" id="closeSet">收起</button></div></form></section>' +
+    '<section class="card danger-zone"><h2>其他</h2><div class="row">' +
+    '<button class="btn warn" id="reset"' + dis + '>' + (armReset ? '再按一次確認歸零' : '號碼全部歸零') + '</button>' +
+    '<button class="btn ghost" id="logout">登出這支手機</button></div>' +
+    '<p class="small muted" style="margin:0">歸零後可以按「復原上一步」救回來。</p></section>';
+}
+
+function render() {
+  let main;
+  if (!authReady) main = '<p class="loading">載入中…</p>';
+  else if (!user) main = loginHtml();
+  else if (!loaded) main = '<p class="loading">正在讀取最新號碼…</p>';
+  else main = staffHtml();
+  const y = scrollY;
+  const form = document.getElementById('setF');
+  const typed = form ? [...form.querySelectorAll('input')].map(i => [i.id, i.value]) : null;
+  const focusId = document.activeElement && document.activeElement.id;
+  app.innerHTML = headerHtml(S, '<span class="badge">店家叫號</span>') + '<main class="wrap stack">' + main + '</main>';
+  if (typed) typed.forEach(([id, v]) => { const i = document.getElementById(id); if (i) i.value = v; });
+  if (focusId) { const f = document.getElementById(focusId); if (f && f.tagName === 'INPUT') f.focus(); }
+  scrollTo(0, y);
+  bind();
+  drawQr(document.getElementById('qrShop'), CUSTOMER_URL, 132);
+}
+
+function drawQr(el, text, size) {
+  if (!el || typeof QRCode === 'undefined') return null;
+  el.innerHTML = '';
+  try { new QRCode(el, { text, width: size * 2, height: size * 2, colorDark: '#211D16', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.M }); } catch (e) {}
+  return el.querySelector('canvas');
+}
+
+function showTicket(n) {
+  const m = document.createElement('div');
+  m.className = 'modal'; m.setAttribute('role', 'dialog'); m.setAttribute('aria-label', '第 ' + n + ' 號號碼牌');
+  m.innerHTML = '<section class="ticket"><div class="t-top"><p class="t-label">' + esc(S.shop) + ' 號碼牌</p></div><div class="t-num">' + n + '</div><div class="perf"></div><div class="t-body">' +
+    '<div class="qr" id="qrT"></div><p class="small" style="margin:0;text-align:center">請客人掃這個 QR，就能看到前面還有幾組</p>' +
+    '<button class="btn" id="closeT">好，下一位</button></div></section>';
+  document.body.appendChild(m);
+  drawQr(document.getElementById('qrT'), CUSTOMER_URL + '#n' + n, 190);
+  const close = () => m.remove();
+  document.getElementById('closeT').addEventListener('click', close);
+  document.getElementById('closeT').focus();
+  m.addEventListener('click', e => { if (e.target === m) close(); });
+}
+
+/* ---------- actions ---------- */
+function on(id, ev, fn) { const e = document.getElementById(id); if (e) e.addEventListener(ev, fn); }
+function bind() {
+  on('loginF', 'submit', async e => {
+    e.preventDefault();
+    const pw = document.getElementById('pw').value;
+    if (!pw) return;
+    busy = true; loginErr = ''; render();
+    try { await signInWithEmailAndPassword(auth, STAFF_EMAIL, pw); }
+    catch (err) {
+      const c = err && err.code;
+      loginErr = (c === 'auth/invalid-credential' || c === 'auth/wrong-password' || c === 'auth/invalid-login-credentials') ? '密碼不對，請再試一次'
+        : c === 'auth/too-many-requests' ? '試太多次了，請過幾分鐘再試'
+        : c === 'auth/network-request-failed' ? '連不上網路，請檢查網路後再試'
+        : '登入失敗，請再試一次';
+    }
+    busy = false; render();
+  });
+  app.querySelectorAll('button.chip[data-n]').forEach(b => b.addEventListener('click', () => {
+    const n = +b.dataset.n; if (sel.has(n)) sel.delete(n); else sel.add(n); render();
+  }));
+  on('issue', 'click', async () => {
+    const n = await commit(cur => {
+      if (cur.issued > 0 && cur.day !== today()) return SKIP; // numbers are from an earlier night: ask first
+      if (cur.issued === 0) cur.day = today();
+      cur.issued += 1;
+      return cur.issued;
+    });
+    if (typeof n === 'number') showTicket(n);
+    else if (n === SKIP) toast('這是前一天的號碼，請先選要不要從 1 號開始');
+  });
+  // Each action takes the selected numbers with it; numbers tapped while it saves stay selected.
+  const take = () => { const ns = [...sel]; ns.forEach(n => sel.delete(n)); return ns; };
+  on('toReady', 'click', () => { const ns = take(); commit(cur => { const w = waiting(cur); ns.filter(n => w.includes(n)).forEach(n => cur.ready.push(n)); }); });
+  on('toCancel', 'click', () => { const ns = take(); commit(cur => { const w = waiting(cur); ns.filter(n => w.includes(n)).forEach(n => cur.cancel.push(n)); }); });
+  on('toDone', 'click', () => {
+    const ns = take();
+    commit(cur => { const hit = ns.filter(n => cur.ready.includes(n)); cur.ready = cur.ready.filter(n => !hit.includes(n)); hit.forEach(n => cur.done.push(n)); });
+  });
+  on('undo', 'click', () => commit(cur => {
+    const u = cur.undo; if (!u) return SKIP;
+    cur.issued = u.issued; cur.ready = u.ready || []; cur.done = u.done || []; cur.cancel = u.cancel || []; if (u.day) cur.day = u.day;
+  }, { clearUndo: true }));
+  on('newDay', 'click', () => { sel.clear(); return commit(zero, { toast: '已歸零，今天從 1 號開始' }); });
+  on('keepDay', 'click', () => commit(cur => { cur.day = today(); }));
+  on('reset', 'click', () => {
+    if (!armReset) { armReset = true; render(); setTimeout(() => { armReset = false; render(); }, 5000); return; }
+    armReset = false; sel.clear(); commit(zero, { toast: '號碼已歸零' });
+  });
+  on('openSet', 'click', () => { showSettings = true; render(); });
+  on('closeSet', 'click', () => { showSettings = false; render(); });
+  on('setF', 'submit', e => {
+    e.preventDefault();
+    const g = id => document.getElementById(id).value.trim();
+    const line = g('sLine');
+    if (line && !/^https:\/\//.test(line)) { toast('LINE 連結要以 https:// 開頭'); return; }
+    const vals = { shop: g('sShop') || '玉米家', hours: g('sHours') || S.hours, base: Math.max(0, +g('sBase') || 0), per: Math.max(0, +g('sPer') || 0), line };
+    commit(cur => { Object.assign(cur, vals); }, { noUndo: true, toast: '設定已儲存' });
+  });
+  on('logout', 'click', () => signOut(auth));
+  on('dlQr', 'click', () => {
+    const c = document.querySelector('#qrShop canvas');
+    if (!c) { toast('QR 還沒產生，請稍後再試'); return; }
+    const a = document.createElement('a'); a.href = c.toDataURL('image/png'); a.download = '玉米家攤位QR.png'; a.click();
+  });
+}
+
+/* ---------- live data ---------- */
+function listen() {
+  if (unsub) return;
+  unsub = onSnapshot(shopRef, { includeMetadataChanges: true }, snap => {
+    const fromServer = !snap.metadata.fromCache;
+    if (fromServer || loaded) {
+      S = normalize(snap.exists() ? snap.data() : null);
+      exists = snap.exists();
+      for (const n of [...sel]) if (n > S.issued || S.done.includes(n) || S.cancel.includes(n)) sel.delete(n);
+    }
+    if (fromServer) loaded = true;
+    stale = !fromServer;
+    render();
+    // First time the stall signs in there is no document yet: create it with the defaults.
+    if (fromServer && !exists && !busy) commit(cur => { if (!cur.day) cur.day = today(); }, { noUndo: true });
+  }, err => {
+    console.error(err); stale = true; render();
+  });
+}
+
+onAuthStateChanged(auth, async u => {
+  authReady = true;
+  if (u && u.email !== STAFF_EMAIL) { await signOut(auth); loginErr = '這個帳號不能叫號'; return; }
+  user = u;
+  if (user) listen();
+  else if (unsub) { unsub(); unsub = null; loaded = false; }
+  render();
+});
+addEventListener('offline', () => { stale = true; render(); });
+// Switching networks may never produce a new snapshot, so check with the server once back online.
+addEventListener('online', () => {
+  if (!user) return;
+  getDocFromServer(shopRef).then(snap => { S = normalize(snap.exists() ? snap.data() : null); stale = false; render(); }, () => {});
+});
+// A phone left open overnight must notice the new business day without a data change.
+setInterval(() => { if (!document.hidden && !document.querySelector('.modal') && !document.getElementById('setF')) render(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+render();
+</script>
+</body>
+</html>

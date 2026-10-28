@@ -1,0 +1,5 @@
+node_modules/
+.cache/
+*.log
+.emulators.pid
+shot-*.png

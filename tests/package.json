@@ -1,0 +1,15 @@
+{
+  "name": "yumijia-emulator-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "emulators": "./start-emulators.sh",
+    "seed": "node seed-staff.mjs",
+    "test": "node --test rules.test.mjs"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.2",
+    "firebase": "12.19.0",
+    "firebase-tools": "15.33.0"
+  }
+}

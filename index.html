@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1E1912">
+<title>玉米家號碼牌</title>
+<link rel="icon" href="icons/favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="description" content="玉米家炭烤玉米・南機場夜市。輸入號碼牌號碼，即時查看前面還有幾組。">
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<link rel="preconnect" href="https://firestore.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=LXGW+WenKai+TC:wght@700&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app"><p class="loading">載入中…</p></div>
+<script type="module">
+import { onSnapshot, getDocFromServer } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
+import { shopRef, normalize, store, esc, today, hhmm, waiting, est, status, headerHtml, toast, MAP } from './common.js';
+
+const app = document.getElementById('app');
+let S = normalize(null), loaded = false, stale = false, staleShown = false, staleT = null;
+
+let myNum = null;
+{
+  const m = location.hash.match(/^#n(\d{1,4})$/);
+  if (m) saveNum(+m[1]);
+  else { const v = /^(\d+)\|(.+)$/.exec(store('yumijiaNum') || ''); if (v && v[2] === today()) myNum = +v[1]; }
+}
+// A remembered number only counts for the business day it was saved on.
+function saveNum(n) { myNum = n; store('yumijiaNum', n ? n + '|' + today() : null); }
+addEventListener('hashchange', () => {
+  const m = location.hash.match(/^#n(\d{1,4})$/);
+  if (m) { saveNum(+m[1]); render(); }
+});
+
+// Started means the stall has issued numbers today; yesterday's numbers must not show as today's.
+const started = () => S.issued > 0 && S.day === today();
+
+function cobHtml(st) {
+  const shown = st.list.filter(x => x <= myNum).slice(-24);
+  const k = shown.map(x => '<span class="k ' + (x === myNum ? 'me' : 'ahead') + '">' + (x === myNum || shown.length <= 12 ? x : '') + '</span>').join('');
+  return '<div class="cob" role="img" aria-label="前面還有 ' + st.ahead + ' 組在烤"><div class="cob-body">' + k + '</div><div class="cob-husk"></div></div>' +
+    '<div class="cob-legend"><span class="a">前面在烤的</span><span class="m">你的玉米</span></div>';
+}
+
+function ticketHtml() {
+  if (!myNum) {
+    return '<section class="ticket"><div class="t-top"><p class="t-label">查詢號碼牌</p></div><div class="t-body">' +
+      '<p style="margin:0">輸入號碼牌上的號碼，馬上知道前面還有幾組。</p>' +
+      '<form class="ask" id="askF"><input id="numIn" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="例如 23" aria-label="號碼"><button class="btn corn" type="submit">查詢</button></form></div></section>';
+  }
+  let body, k;
+  if (!started()) {
+    k = 'notyet';
+    body = '<p class="pill notyet">今天還沒開始發號</p><p style="margin:0">店家開始叫號後，這個畫面會自動更新，不用重新整理。</p>';
+  } else {
+    const st = status(S, myNum); k = st.k;
+    if (st.k === 'wait') {
+      body = '<p class="pill wait">炭火烤製中</p>' +
+        '<div class="kv"><div><b>' + st.ahead + '<i>組</i></b><span>前面還有</span></div><div><b>' + est(S, st.ahead) + '<i>分</i></b><span>預估等候</span></div></div>' +
+        cobHtml(st) +
+        '<p class="small muted" style="margin:0">先去逛逛夜市吧！號碼變成綠色「可以取餐」時，再拿號碼牌回攤位就好。這個畫面會自動更新。</p>';
+    } else if (st.k === 'ready') {
+      body = '<p class="pill ready">可以取餐了</p><p class="big-msg">玉米烤好囉，請拿號碼牌到攤位取餐</p>';
+    } else if (st.k === 'done') {
+      body = '<p class="pill done">已取餐</p><p style="margin:0">謝謝光臨' + esc(S.shop) + '，趁熱吃！</p>';
+    } else if (st.k === 'cancel') {
+      body = '<p class="pill cancel">此號已取消</p><p style="margin:0">有問題請直接到攤位詢問。</p>';
+    } else {
+      body = '<p class="pill notyet">還沒發到這個號碼</p><p style="margin:0">店家目前發到 ' + S.issued + ' 號，請確認號碼牌上的數字。</p>';
+    }
+  }
+  return '<section class="ticket ' + k + '" aria-live="polite"><div class="t-top"><p class="t-label">號碼牌</p><button class="link small" id="chg">換號碼</button></div>' +
+    '<div class="t-num">' + myNum + '<small>' + esc(S.shop) + ' · ' + esc(S.area) + '</small></div><div class="perf"></div><div class="t-body">' + body + '</div></section>';
+}
+
+function queueHtml() {
+  const on = started();
+  const w = on ? waiting(S) : [];
+  const ready = on ? S.ready.slice().sort((a, b) => a - b) : [];
+  const readyHtml = ready.length
+    ? '<div class="chips">' + ready.map(n => '<span class="chip ready' + (n === myNum ? ' me' : '') + '">' + n + '</span>').join('') + '</div>'
+    : '<p class="empty">目前沒有待取的號碼。</p>';
+  return '<section class="card"><div class="row" style="justify-content:space-between"><h2>可以取餐</h2><span class="small muted">更新於 ' + hhmm(S.updated) + '</span></div>' + readyHtml + '</section>' +
+    '<div class="stats"><div class="hl"><b>' + (w[0] || '–') + '</b><span>正在烤</span></div><div><b>' + w.length + '</b><span>排隊組數</span></div><div><b>' + est(S, w.length) + '</b><span>現在抽號約等（分）</span></div></div>';
+}
+
+function infoHtml() {
+  const line = /^https:\/\//.test(S.line || '') ? '<a class="l-line" href="' + esc(S.line) + '" target="_blank" rel="noopener">加 LINE 訂購</a>' : '';
+  return '<section class="card"><h2>取餐須知</h2><div class="langs">' +
+      '<p>取餐依叫號順序，現烤現吃最好吃。請盡量別包起來，會悶出水氣。</p>' +
+      '<p class="l2">Pick-up follows the number order. Best eaten right off the grill. Please don’t wrap it, or it gets soggy.</p>' +
+      '<p class="l2">番号順にお渡しします。焼きたてが一番おいしいです。包むと蒸れてしまいます。</p>' +
+      '<p class="l2">번호 순서대로 드려요. 갓 구웠을 때 제일 맛있어요. 포장하면 눅눅해져요.</p></div>' +
+      '<div class="links2"' + (line ? '' : ' style="grid-template-columns:1fr"') + '><a class="l-star" href="' + MAP + '" target="_blank" rel="noopener">★ 給我們五星評論</a>' + line + '</div></section>' +
+    '<section class="card info"><h2>今晚的口味</h2>' +
+      '<div class="flavors"><div class="flv"><i style="background:#E9B44C"></i>原味</div><div class="flv"><i style="background:#A35A2A"></i>孜然</div><div class="flv"><i style="background:#9DBB3A"></i>芥末</div><div class="flv"><i style="background:#F2DC5D"></i>檸檬</div></div>' +
+      '<p class="small muted" style="margin:0">辣度五段可選，軟硬可挑。每支依現場標價。</p>' +
+      '<dl><dt>地址</dt><dd>' + esc(S.addr) + '</dd>' +
+      '<dt>電話</dt><dd><a href="tel:' + esc(String(S.phone).replace(/\s/g, '')) + '" style="color:inherit">' + esc(S.phone) + '</a></dd>' +
+      '<dt>營業</dt><dd>傍晚營業至 ' + esc(S.hours) + '</dd></dl>' +
+      '<a class="small" href="' + MAP + '" target="_blank" rel="noopener" style="color:var(--ember);font-weight:500">在 Google 地圖開啟 →</a></section>';
+}
+
+function render() {
+  const focused = document.activeElement && document.activeElement.id === 'numIn' ? document.getElementById('numIn').value : null;
+  const conn = staleShown ? '<div class="conn" role="alert">連線中斷，正在重新連線…下面的號碼可能不是最新的</div>' : '';
+  const queue = started() ? '<span class="badge">排隊 ' + waiting(S).length + ' 組</span>' : '';
+  const main = loaded ? ticketHtml() + queueHtml() + infoHtml() : '<p class="loading">正在讀取最新號碼…</p>' + infoHtml();
+  app.innerHTML = headerHtml(S, queue) + '<main class="wrap stack">' + conn + main + '</main>';
+  bind();
+  if (focused !== null) { const i = document.getElementById('numIn'); if (i) { i.value = focused; i.focus(); } }
+}
+
+function bind() {
+  const chg = document.getElementById('chg');
+  if (chg) chg.addEventListener('click', () => {
+    saveNum(null);
+    if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+    render(); const i = document.getElementById('numIn'); if (i) i.focus();
+  });
+  const f = document.getElementById('askF');
+  if (f) f.addEventListener('submit', e => {
+    e.preventDefault();
+    const v = (document.getElementById('numIn').value || '').replace(/\D/g, '');
+    if (!v || +v < 1) { toast('請輸入號碼牌上的數字'); return; }
+    saveNum(+v); render();
+  });
+}
+
+// Only warn about a lost connection if it lasts more than a moment, so a brief blip doesn't flash red.
+function setStale(v) {
+  stale = v;
+  clearTimeout(staleT);
+  if (!v) { if (staleShown) { staleShown = false; render(); } return; }
+  staleT = setTimeout(() => { if (stale && !staleShown) { staleShown = true; render(); } }, 2500);
+}
+
+// Every update to every open page counts against the free daily read quota, so a page left in the
+// background stops listening after a few minutes and catches up as soon as it is looked at again.
+let unsub = null, pauseT = null;
+function listen() {
+  if (unsub) return;
+  unsub = onSnapshot(shopRef, { includeMetadataChanges: true }, snap => {
+    const fromServer = !snap.metadata.fromCache;
+    if (fromServer || loaded) { S = normalize(snap.exists() ? snap.data() : null); }
+    if (fromServer) loaded = true;
+    setStale(!fromServer);
+    render();
+  }, err => {
+    console.error(err);
+    setStale(true);
+  });
+}
+document.addEventListener('visibilitychange', () => {
+  clearTimeout(pauseT);
+  if (document.hidden) pauseT = setTimeout(() => { if (unsub) { unsub(); unsub = null; } }, 3 * 60e3);
+  else listen();
+});
+listen();
+addEventListener('offline', () => setStale(true));
+// Switching networks may never produce a new snapshot, so check with the server once back online.
+addEventListener('online', () => { getDocFromServer(shopRef).then(snap => { S = normalize(snap.exists() ? snap.data() : null); loaded = true; setStale(false); render(); }, () => {}); });
+// Re-render now and then so the business-day check and "not started" state stay current on a page left open.
+setInterval(() => { if (!document.hidden) render(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+render();
+</script>
+</body>
+</html>
