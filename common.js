@@ -23,7 +23,7 @@ export const MAP = 'https://maps.app.goo.gl/Hf1Q8FgP2j67hbAw6';
 export const DEFAULTS = {
   shop: '玉米家', area: '南機場夜市',
   addr: '臺北市中正區中華路二段315巷5弄', phone: '0931 504 865', hours: '23:30',
-  line: '', base: 15, per: 4,
+  line: '', base: 15, per: 4, qrPopup: false,
   issued: 0, ready: [], done: [], cancel: [], day: '', undo: null
 };
 

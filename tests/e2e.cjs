@@ -93,13 +93,11 @@ async function noBannedWords(page, label) {
     await staff.page.locator('#issue').waitFor({ timeout: 15000 });
     step('stays signed in after reload');
 
-    // Issue three numbers; the ticket QR points at the customer page.
+    // Issue three numbers; by default no QR pop-up, just a note saying which tag to hand over.
     for (let i = 1; i <= 3; i++) {
       await staff.page.locator('#issue:not([disabled])').click();
-      await staff.page.locator('.modal').waitFor();
-      const qr = await staff.page.locator('#qrT canvas').getAttribute('data-text');
-      assert.strictEqual(qr, base + '/#n' + i);
-      await staff.page.locator('#closeT').click();
+      await staff.page.getByText('已發 ' + i + ' 號，請給客人 ' + i + ' 號牌').waitFor({ timeout: 5000 });
+      assert.strictEqual(await staff.page.locator('.modal').count(), 0);
     }
     const t0 = Date.now();
     await cust.page.getByText('前面還有').waitFor({ timeout: 2000 });
@@ -142,11 +140,10 @@ async function noBannedWords(page, label) {
     await staff2.page.locator('#loginF button').click();
     await staff2.page.locator('#issue').waitFor({ timeout: 15000 });
     await Promise.all([staff.page.locator('#issue').click(), staff2.page.locator('#issue').click()]);
-    await staff.page.locator('.modal').waitFor(); await staff2.page.locator('.modal').waitFor();
-    const a = await staff.page.locator('.modal .t-num').innerText(), b = await staff2.page.locator('.modal .t-num').innerText();
+    const issued = async p => { const t = p.locator('.toast', { hasText: /已發 [45] 號/ }); await t.waitFor({ timeout: 5000 }); return (await t.innerText()).match(/已發 (\d+) 號/)[1]; };
+    const a = await issued(staff.page), b = await issued(staff2.page);
     assert.notStrictEqual(a, b);
     assert.deepStrictEqual([a, b].map(Number).sort(), [4, 5]);
-    await staff.page.locator('#closeT').click(); await staff2.page.locator('#closeT').click();
     step('two phones pressing at once get ' + a + ' and ' + b);
 
     // Settings: LINE link appears on the customer page.
@@ -154,15 +151,23 @@ async function noBannedWords(page, label) {
     await staff.page.locator('#openSet').click();
     await staff.page.locator('#sLine').fill('https://lin.ee/example');
     await staff.page.locator('#sBase').fill('10');
+    await staff.page.locator('#sPopup').check();
     await staff.page.locator('#setF button[type=submit]').click();
     await cust.page.locator('a.l-line[href="https://lin.ee/example"]').waitFor({ timeout: 2000 });
     step('settings save; LINE button appears for customers');
+
+    // With the pop-up switched on, issuing shows the ticket QR pointing at the customer page.
+    await staff2.page.locator('#issue:not([disabled])').click();
+    await staff2.page.locator('.modal').waitFor({ timeout: 5000 });
+    assert.strictEqual(await staff2.page.locator('#qrT canvas').getAttribute('data-text'), base + '/#n6');
+    await staff2.page.locator('#closeT').click();
+    step('QR pop-up setting shows the ticket QR (' + base + '/#n6)');
 
     // Typing in settings survives another phone changing the queue.
     await staff.page.locator('#sShop').fill('玉米家測試中');
     await staff2.page.locator('#issue').click();
     await staff2.page.locator('.modal').waitFor(); await staff2.page.locator('#closeT').click();
-    await staff.page.getByText('發下一號 7').waitFor({ timeout: 3000 });
+    await staff.page.getByText('發下一號 8').waitFor({ timeout: 3000 });
     assert.strictEqual(await staff.page.locator('#sShop').inputValue(), '玉米家測試中');
     await staff.page.locator('#sShop').fill('玉米家');
     step('settings input keeps typed text while the queue changes');

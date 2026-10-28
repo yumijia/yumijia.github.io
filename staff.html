@@ -105,7 +105,7 @@ function staffHtml() {
     (S.undo ? '<button class="btn ghost" id="undo"' + dis + '>復原上一步</button>' : '') + '</div>' +
     '<p class="small muted" style="margin:0">更新於 ' + hhmm(S.updated) + '</p></section>';
   h += '<section class="card"><h2>攤位 QR</h2><div class="qrbox"><div class="qr" id="qrShop"></div><div style="flex:1;min-width:160px" class="small">' +
-    '貼在攤位上，客人掃了輸入號碼就能查進度。每張號碼牌也有自己的 QR，發號後會跳出來給客人掃。' +
+    '印成貼紙貼在號碼牌或攤位上，客人掃了輸入號碼就能查進度。' +
     '<div class="row" style="margin-top:8px"><button class="link" id="dlQr">下載 QR 圖檔</button><a class="link" href="./" target="_blank" rel="noopener">看客人畫面 ↗</a></div></div></div></section>';
   h += showSettings ? settingsHtml() : '<div class="row" style="justify-content:center"><button class="btn ghost" id="openSet">設定</button></div>';
   return h;
@@ -119,6 +119,7 @@ function settingsHtml() {
     '<div class="grid2"><label class="field">第一組大約等幾分鐘<input id="sBase" type="number" inputmode="numeric" min="0" max="180" value="' + esc(S.base) + '"></label>' +
     '<label class="field">每多一組加幾分鐘<input id="sPer" type="number" inputmode="numeric" min="0" max="60" value="' + esc(S.per) + '"></label></div>' +
     '<label class="field">LINE 加好友連結（沒填，客人頁就不顯示 LINE 按鈕）<input id="sLine" type="url" inputmode="url" placeholder="https://lin.ee/…" value="' + esc(S.line) + '"></label>' +
+    '<label class="check"><input type="checkbox" id="sPopup"' + (S.qrPopup ? ' checked' : '') + '><span>發號後跳出 QR 給客人當場掃<br><span class="small muted">號碼牌上已經有 QR 的話不用開，發號會比較快</span></span></label>' +
     '<div class="row"><button class="btn corn" type="submit"' + dis + '>儲存設定</button><button class="btn ghost" type="button" id="closeSet">收起</button></div></form></section>' +
     '<section class="card danger-zone"><h2>其他</h2><div class="row">' +
     '<button class="btn warn" id="reset"' + dis + '>' + (armReset ? '再按一次確認歸零' : '號碼全部歸零') + '</button>' +
@@ -134,10 +135,10 @@ function render() {
   else main = staffHtml();
   const y = scrollY;
   const form = document.getElementById('setF');
-  const typed = form ? [...form.querySelectorAll('input')].map(i => [i.id, i.value]) : null;
+  const typed = form ? [...form.querySelectorAll('input')].map(i => [i.id, i.type === 'checkbox' ? i.checked : i.value]) : null;
   const focusId = document.activeElement && document.activeElement.id;
   app.innerHTML = headerHtml(S, '<span class="badge">店家叫號</span>') + '<main class="wrap stack">' + main + '</main>';
-  if (typed) typed.forEach(([id, v]) => { const i = document.getElementById(id); if (i) i.value = v; });
+  if (typed) typed.forEach(([id, v]) => { const i = document.getElementById(id); if (i) { if (i.type === 'checkbox') i.checked = v; else i.value = v; } });
   if (focusId) { const f = document.getElementById(focusId); if (f && f.tagName === 'INPUT') f.focus(); }
   scrollTo(0, y);
   bind();
@@ -193,7 +194,8 @@ function bind() {
       cur.issued += 1;
       return cur.issued;
     });
-    if (typeof n === 'number') showTicket(n);
+    // The physical tags already carry a QR, so by default just say which tag to hand over and keep going.
+    if (typeof n === 'number') { if (S.qrPopup) showTicket(n); else toast('已發 ' + n + ' 號，請給客人 ' + n + ' 號牌'); }
     else if (n === SKIP) toast('這是前一天的號碼，請先選要不要從 1 號開始');
   });
   // Each action takes the selected numbers with it; numbers tapped while it saves stay selected.
@@ -221,7 +223,7 @@ function bind() {
     const g = id => document.getElementById(id).value.trim();
     const line = g('sLine');
     if (line && !/^https:\/\//.test(line)) { toast('LINE 連結要以 https:// 開頭'); return; }
-    const vals = { shop: g('sShop') || '玉米家', hours: g('sHours') || S.hours, base: Math.max(0, +g('sBase') || 0), per: Math.max(0, +g('sPer') || 0), line };
+    const vals = { shop: g('sShop') || '玉米家', hours: g('sHours') || S.hours, base: Math.max(0, +g('sBase') || 0), per: Math.max(0, +g('sPer') || 0), line, qrPopup: document.getElementById('sPopup').checked };
     commit(cur => { Object.assign(cur, vals); }, { noUndo: true, toast: '設定已儲存' });
   });
   on('logout', 'click', () => signOut(auth));
